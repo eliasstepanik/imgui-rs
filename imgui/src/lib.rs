@@ -170,6 +170,8 @@ mod popups;
 mod render;
 #[cfg(feature = "docking")]
 pub mod viewport_issue_fix;
+#[cfg(feature = "docking")]
+pub mod monitor_init_fix;
 mod stacks;
 mod style;
 #[cfg(feature = "tables-api")]
