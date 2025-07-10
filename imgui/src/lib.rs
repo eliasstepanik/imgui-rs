@@ -168,6 +168,8 @@ mod plothistogram;
 mod plotlines;
 mod popups;
 mod render;
+#[cfg(feature = "docking")]
+pub mod viewport_issue_fix;
 mod stacks;
 mod style;
 #[cfg(feature = "tables-api")]
