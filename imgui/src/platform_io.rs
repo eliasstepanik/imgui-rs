@@ -1,3 +1,66 @@
+//! Platform I/O and viewport support for ImGui.
+//!
+//! # Viewport Support
+//!
+//! Dear ImGui supports multiple viewports, allowing ImGui windows to be dragged outside
+//! the main application window and rendered as separate OS windows. This feature requires
+//! the `docking` feature to be enabled.
+//!
+//! ## Viewport Lifecycle
+//!
+//! 1. **Creation**: When an ImGui window is dragged outside the main window, ImGui creates
+//!    a new viewport and calls `PlatformViewportBackend::create_window()`.
+//!
+//! 2. **Rendering**: Each frame, viewports with visible content will have their `DrawData`
+//!    populated. Use `viewport.draw_data()` to safely access it (returns `None` if no content).
+//!
+//! 3. **Updates**: Platform backends handle window movement, resizing, and other OS events
+//!    through the various `PlatformViewportBackend` methods.
+//!
+//! 4. **Destruction**: When a viewport is no longer needed, ImGui calls
+//!    `PlatformViewportBackend::destroy_window()`.
+//!
+//! ## Usage Example
+//!
+//! ```rust,no_run
+//! # #[cfg(feature = "docking")] {
+//! # use imgui::*;
+//! # fn render_draw_data(draw_data: &DrawData) {}
+//! # let mut ctx = Context::create();
+//! # // Initialize context properly
+//! # ctx.io_mut().display_size = [1280.0, 720.0];
+//! # ctx.io_mut().delta_time = 1.0 / 60.0;
+//! # ctx.fonts().build_rgba32_texture();
+//! // Enable viewport support
+//! ctx.io_mut().config_flags |= ConfigFlags::VIEWPORTS_ENABLE;
+//!
+//! // In your render loop:
+//! ctx.new_frame();
+//! // ... build UI here ...
+//! let draw_data = ctx.render(); // Must call render() first
+//! render_draw_data(draw_data);
+//!
+//! ctx.update_platform_windows(); // Call AFTER render()
+//!
+//! // Render additional viewports
+//! for viewport in ctx.viewports() {
+//!     if !viewport.is_main() {
+//!         if let Some(draw_data) = viewport.draw_data() {
+//!             render_draw_data(draw_data);
+//!         }
+//!     }
+//! }
+//!
+//! ctx.render_platform_windows_default();
+//! # }
+//! ```
+//!
+//! ## Safety Notes
+//!
+//! - `DrawData` is only valid between `render()` and the next `new_frame()`
+//! - Viewports can be created/destroyed at any time by ImGui
+//! - Platform handles must be validated before use
+
 use std::ffi::{c_char, c_void};
 
 use crate::{internal::RawCast, ViewportFlags};
@@ -198,9 +261,36 @@ pub struct Viewport {
 
 #[cfg(feature = "docking")]
 impl Viewport {
-    /// Returns the draw data of the respective Viewport.
-    pub fn draw_data(&self) -> &crate::DrawData {
-        unsafe { &*self.draw_data }
+    /// Returns the draw data of the viewport if it has any content to render.
+    /// 
+    /// Returns `None` if the viewport has no visible content or DrawData is not available.
+    pub fn draw_data(&self) -> Option<&crate::DrawData> {
+        if self.draw_data.is_null() {
+            None
+        } else {
+            Some(unsafe { &*self.draw_data })
+        }
+    }
+    
+    /// Returns true if this is the main viewport (the primary application window).
+    /// 
+    /// The main viewport always exists and has a special ID of 0x11111111.
+    pub fn is_main(&self) -> bool {
+        // Main viewport has the special ID defined in imgui
+        const IMGUI_VIEWPORT_DEFAULT_ID: u32 = 0x11111111;
+        self.id.0 == IMGUI_VIEWPORT_DEFAULT_ID
+    }
+    
+    /// Returns the platform handle cast to the specified type.
+    /// 
+    /// # Safety
+    /// The caller must ensure the platform handle is valid and of the correct type.
+    pub unsafe fn platform_handle_as<T>(&self) -> Option<&T> {
+        if self.platform_handle.is_null() {
+            None
+        } else {
+            Some(&*(self.platform_handle as *const T))
+        }
     }
 }
 
@@ -248,4 +338,86 @@ fn test_viewport_memory_layout() {
         assert_field_offset!(platform_request_resize, PlatformRequestResize);
         assert_field_offset!(platform_request_close, PlatformRequestClose);
     }
+}
+
+#[test]
+#[cfg(all(test, feature = "docking"))]
+fn test_viewport_is_main() {
+    // Use the test helper that properly initializes the context
+    let (_guard, mut ctx) = crate::test::test_ctx_initialized();
+    
+    // Must be within a frame to access viewport data
+    ctx.new_frame();
+    
+    // Test that main viewport is correctly identified
+    let main_viewport = ctx.main_viewport();
+    assert!(main_viewport.is_main());
+    assert_eq!(main_viewport.id.0, 0x11111111);
+}
+
+#[test]
+#[cfg(all(test, feature = "docking"))]
+fn test_viewport_draw_data_null_safety() {
+    // Use the test helper that properly initializes the context
+    let (_guard, mut ctx) = crate::test::test_ctx_initialized();
+    
+    // Must be within a frame to access viewport data
+    ctx.new_frame();
+    
+    // Without rendering, viewports might have null draw data
+    // This test ensures draw_data() doesn't panic on null pointers
+    for viewport in ctx.viewports() {
+        let _draw_data = viewport.draw_data(); // Should not panic
+    }
+}
+
+#[test]
+#[cfg(all(test, feature = "docking"))]
+fn test_viewport_platform_handle_null_safety() {
+    use std::ffi::c_void;
+    
+    // Create a mock viewport with null platform handle
+    let viewport = Viewport {
+        id: crate::Id(123),
+        flags: ViewportFlags::empty(),
+        pos: [0.0, 0.0],
+        size: [100.0, 100.0],
+        work_pos: [0.0, 0.0],
+        work_size: [100.0, 100.0],
+        dpi_scale: 1.0,
+        parent_viewport_id: crate::Id(0),
+        draw_data: std::ptr::null_mut(),
+        renderer_user_data: std::ptr::null_mut(),
+        platform_user_data: std::ptr::null_mut(),
+        platform_handle: std::ptr::null_mut(),
+        platform_handle_raw: std::ptr::null_mut(),
+        platform_window_created: false,
+        platform_request_move: false,
+        platform_request_resize: false,
+        platform_request_close: false,
+    };
+    
+    // Test that platform_handle_as returns None for null handle
+    unsafe {
+        let handle: Option<&c_void> = viewport.platform_handle_as::<c_void>();
+        assert!(handle.is_none());
+    }
+}
+
+#[test]
+#[cfg(all(test, feature = "docking"))]
+fn test_viewport_iteration() {
+    // Use the test helper that properly initializes the context
+    let (_guard, mut ctx) = crate::test::test_ctx_initialized();
+    
+    // Must be within a frame to access viewport data
+    ctx.new_frame();
+    
+    // At minimum, there should be one viewport (the main viewport)
+    let viewport_count = ctx.viewports().count();
+    assert!(viewport_count >= 1);
+    
+    // The main viewport should be in the iteration
+    let has_main = ctx.viewports().any(|vp| vp.is_main());
+    assert!(has_main);
 }
